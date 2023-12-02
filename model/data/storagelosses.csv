@@ -1,0 +1,8 @@
+storage,fuel,value
+Battery,Power,0.9999
+PHS,Power,0.999
+H2Tank,H2,1
+Saline_aquifer_offshore,Stored_CO2,0.9999
+Saline_aquifer_onshore,Stored_CO2,0.9999
+Depleted_hydrocarbon_fields_offshore,Stored_CO2,0.9999
+Depleted_hydrocarbon_fields_onshore,Stored_CO2,0.9999

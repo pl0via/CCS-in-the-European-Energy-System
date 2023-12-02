@@ -1,0 +1,22 @@
+General technologies,Aquivalent technologies used in this scenario run
+SolarPV,SolarPV
+CoalMine,CoalMine
+GasExtractor,GasExtractor
+CoalPowerPlant,CoalPowerPlant
+GasPowerPlant,GasPowerPlant
+CoalCHPPlant,CoalCHPPlant
+GasCHPPlant,GasCHPPlant
+Power2Gas,Power2Gas
+H2Car,H2Car
+BEV,BEV
+LPGCar,LPGCar
+BiomassGenerator,BiomassGenerator
+WindOnshore,WindOnshore
+ElectricHeater,ElectricHeater
+WindOffshore,WindOffshore
+BiomassPowerPlant,BiomassPowerPlant
+CoalPowerPlant_CCS,CoalPowerPlant_CCS_affordable
+GasPowerPlant_CCS,GasPowerPlant_CCS_affordable
+CoalCHPPlant_CCS,CoalCHPPlant_CCS_affordable
+GasCHPPlant_CCS,GasCHPPlant_CCS_affordable
+BiomassPowerPlant_CCS,BiomassPowerPlant_CCS_affordable

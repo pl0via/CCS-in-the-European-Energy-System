@@ -1,0 +1,10 @@
+Year,CO2_Transport_Technology,To,From,value
+2050,Pipeline_diameter_1.6,DK,DE,2.0
+2030,Pipeline_diameter_1.6,FR,UK,1.0
+2040,Pipeline_diameter_1.6,FR,DE,1.0
+2040,Pipeline_diameter_1.6,FR,UK,3.0
+2040,Pipeline_diameter_1.6,NO,DK,2.0
+2040,Pipeline_diameter_1.6,UK,FR,1.0
+2040,Pipeline_diameter_1.6,DK,DE,2.0
+2050,Pipeline_diameter_1.6,NO,DK,3.0
+2050,Pipeline_diameter_1.6,UK,FR,1.0

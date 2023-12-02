@@ -1,0 +1,772 @@
+## Packages
+using Pkg
+Pkg.activate(joinpath(@__DIR__, "."))
+Pkg.develop(path=joinpath(@__DIR__, "Dashboard"))
+Pkg.instantiate()
+
+
+
+################################ IMPORTANT #############################
+## Set working directory correctly
+# Set path to folder containing this file
+cd("/Users/lennart/Documents/EW-MOD/Term paper/model")
+
+## Scenario settings  
+#= Choose scenario:
+a) "No_CCS" 
+b) "CCS_affordable" 
+c) "CCS_costly" 
+=#
+scenario_name = "CCS_affordable"
+
+## Additional settings 
+# Do you want to save the optimal values of this run and set them as starting values for the next  run? 
+# Hint: This is recommanded when working with the CCS scenarios which are formulated as MIPs which require higher computing time 
+save_solution_values = false
+
+# Do you want to update all packages?  
+update_packages = false
+################################ IMPORTANT #############################
+
+
+
+########################################################################
+###################### NO CHANGES BELOW THIS POINT #####################
+########################################################################
+
+
+## Packages
+
+# Updates packages
+if update_packages
+    Pkg.update()
+end     
+
+using JuMP # Julias modelling environment
+using DataStructures # Using dictionaries with a default value
+using HiGHS # Solver for the JuMP model
+#using Gurobi
+using CSV # Import of CSV files
+using DataFrames # Data tables
+using JSON3
+using Dashboard
+
+
+## Data import
+
+# Define the path to the data directory
+data_dir = joinpath(@__DIR__, "data")
+# Define the path to the results directory
+result_path = mkpath(joinpath(@__DIR__, "results"))
+
+# Sets
+technologies = readcsv("technologies.csv", dir=data_dir).technology
+fuels = readcsv("fuels.csv", dir=data_dir).fuel
+hour = 1:120
+n_hour = length(hour)
+storages = readcsv("storages.csv", dir=data_dir).storage
+year = 2020:10:2050
+regions = readcsv("regions.csv", dir=data_dir).region
+
+# Parameters
+Demand = readin("demand.csv", default=0, dims=3, dir=data_dir)
+OutputRatio = readin("outputratio.csv", dims=2, dir=data_dir)
+InputRatio = readin("inputratio.csv", dims=2, dir=data_dir)
+VariableCost = readin("variablecost_$(scenario_name).csv", dims=2, dir=data_dir)
+InvestmentCost = readin("investmentcost_$(scenario_name).csv", dims=2, dir=data_dir)
+EmissionRatio = readin("emissionratio.csv", dims=1, dir=data_dir)
+DemandProfile = readin("demand_timeseries_regions.csv", default=1/n_hour, dims=3, dir=data_dir)
+MaxCapacity = readin("maxcapacity.csv",default=999,dims=3, dir=data_dir)
+TagDispatchableTechnology = readin("tag_dispatchabletechnology.csv",dims=1, dir=data_dir)
+CapacityFactor = readin("capacity_factors_regions.csv",default=0, dims=3, dir=data_dir)
+for t in technologies
+    if TagDispatchableTechnology[t] > 0
+        for h in hour
+            for r in regions
+                CapacityFactor[r,t,h] = 1
+            end
+        end
+    end
+end
+
+# Energy storages
+InvestmentCostStorage = readin("investmentcoststorage.csv",dims=2, dir=data_dir)
+E2PRatio = readin("e2pratio.csv",dims=1, dir=data_dir)
+StorageChargeEfficiency = readin("storagechargeefficiency.csv",dims=2, dir=data_dir)
+StorageDisChargeEfficiency = readin("storagedischargeefficiency.csv",dims=2, dir=data_dir)
+MaxStorageCapacity = readin("maxstoragecapacity.csv",default=9999,dims=3, dir=data_dir)
+StorageLosses = readin("storagelosses.csv",default=1,dims=2, dir=data_dir)
+
+# Residual capacities
+ResidualCapacity = readin("residualcapacity.csv",default=0,dims=3, dir=data_dir)
+
+# Technology lifetimes
+TechnologyLifetime = readin("technologylifetime.csv",default=10,dims=1, dir=data_dir)
+
+# Trade and transport
+MaxTradeCapacity = readin("maxtradecapacity.csv",default=0,dims=4, dir=data_dir)
+TradeDistance = readin("tradedistance.csv",default=99999,dims=2, dir=data_dir)
+TradeCostFactor = readin("tradecostfactor.csv",default=0,dims=1, dir=data_dir)
+TradeLossFactor = readin("tradelossfactor.csv",default=0,dims=1, dir=data_dir)
+
+# Annual and total emission limit
+AnnualEmissionLimit = readin("annualemissionlimit_regions.csv",default=99999,dims=2, dir=data_dir)
+TotalEmissionLimit = readcsv("totalemissionlimit.csv",dir=data_dir).totalemissionlimit
+
+# Discount rate
+DiscountRate = 0.05
+
+# Create a multiplier to weight the different years correctly
+YearlyDifferenceMultiplier = Dict()
+for i in 1:length(year)-1
+    difference = year[i+1] - year[i]
+    # Store the difference in the dictionary
+    YearlyDifferenceMultiplier[year[i]] = difference
+end
+YearlyDifferenceMultiplier[year[end]] = 1
+# this gives us the distance between each year for all years
+YearlyDifferenceMultiplier
+
+# CO2 infrastructure parameters
+PowerPlantsWithCCS = readcsv("powerplants_with_CCS.csv", dir=data_dir).technology
+co2_storages = readcsv("co2_storages.csv", dir=data_dir).co2_storages
+co2_pipelines = readcsv("co2_pipeline_technologies.csv", dir=data_dir).technology
+
+CO2_StorageMaximumCapacity = readin("co2_maxstoragecapacity.csv",default=9999,dims=2, dir=data_dir)
+CO2_StoragesInvestmentCost = readin("co2_investmentcosts_storages.csv",default=0.5,dims=1, dir=data_dir)
+CO2_StoragesVariableCost = readin("co2_variablecosts_storages.csv",default=0.5,dims=1, dir=data_dir)
+
+CO2_PipelineInvestmentCost = readin("co2_investmentcosts_pipelines.csv",default=9999,dims=1, dir=data_dir)
+
+CO2_PipelineCapacity = readin("co2_maxpipelinecapacity.csv",default=0,dims=1, dir=data_dir)
+CO2_MaximumTradeCapacity = readin("co2_maxannualtradecapacity.csv",default=0,dims=2, dir=data_dir)
+
+# CO2 Price 
+CO2_Price = readin("co2_prices.csv",default=0,dims=1, dir=data_dir)
+
+
+
+## Scenario specifications 
+
+# Include/Exclude C02 capture, transport and storage infrastructure
+if scenario_name == "No_CCS"
+
+    Integrate_C02_Infrastructure = false
+
+elseif scenario_name == "CCS_affordable"
+
+    Integrate_C02_Infrastructure = true
+
+elseif scenario_name == "CCS_costly" 
+
+    Integrate_C02_Infrastructure = true
+
+end
+
+
+
+## Optimization model
+
+# Create model with choosen optimizer
+ESM = Model(HiGHS.Optimizer)
+
+## Variables
+@variable(ESM,TotalProductionAndInvestmentCost[technologies]>=0)
+@variable(ESM,Production[year,regions,hour,technologies, fuels] >= 0)
+@variable(ESM,NewCapacity[year,regions,technologies] >=0)
+@variable(ESM,TotalCapacity[year,regions,technologies] >=0)
+@variable(ESM,Use[year,regions,hour,technologies, fuels] >=0)
+@variable(ESM,AnnualTechnologyEmissions[year,regions,technologies])
+
+if !Integrate_C02_Infrastructure
+
+    # Production
+    @constraint(ESM, Set_C02_Variables_To_0_01[y in year, r in regions, h in hour, t in PowerPlantsWithCCS, f in fuels],
+        Production[y,r,h,t,f] == 0
+    )
+
+    # TotalProductionAndInvestmentCost
+    @constraint(ESM, Set_C02_Variables_To_0_02[t in PowerPlantsWithCCS],
+        TotalProductionAndInvestmentCost[t] == 0
+    )
+
+    # NewCapacity
+    @constraint(ESM, Set_C02_Variables_To_0_03[y in year, r in regions, t in PowerPlantsWithCCS],
+        NewCapacity[y,r,t] == 0
+    )
+
+    # TotalCapacity
+    @constraint(ESM, Set_C02_Variables_To_0_04[y in year, r in regions, t in PowerPlantsWithCCS],
+        TotalCapacity[y,r,t] == 0
+    )
+
+    # Use
+    @constraint(ESM, Set_C02_Variables_To_0_05[y in year, r in regions, h in hour, t in PowerPlantsWithCCS, f in fuels],
+        Use[y,r,h,t,f] == 0
+    )
+
+    # AnnualTechnologyEmissions
+    @constraint(ESM, Set_C02_Variables_To_0_06[y in year, r in regions, t in PowerPlantsWithCCS],
+        AnnualTechnologyEmissions[y,r,t] == 0
+    )
+
+end
+
+
+@variable(ESM,Curtailment[year,regions,hour,fuels] >=0)
+@variable(ESM,TotalTransportCost_Operational>=0)
+
+@variable(ESM,TotalStorageEnergyCapacity[year,regions,s=storages,f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,NewStorageEnergyCapacity[year,regions,s=storages,f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,StorageCharge[year,regions,s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,StorageDischarge[year,regions,s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,StorageLevel[year,regions,s=storages, hour, f=fuels; StorageDisChargeEfficiency[s,f]>0]>=0)
+@variable(ESM,TotalEnergyStorageCost_Investment[storages] >= 0)
+
+@variable(ESM,Import[year,hour,r=regions,rr=regions,fuels[Not(8)]; r != rr && (TradeDistance[r,rr] < 9999)] >= 0)
+@variable(ESM,Export[year,hour,r=regions,rr=regions,fuels[Not(8)]; r != rr && (TradeDistance[r,rr] < 9999)] >= 0)
+
+@variable(ESM,TotalEmissions >= 0)
+
+@variable(ESM,SalvageValue[y=year, r=regions, t=vcat(technologies, co2_pipelines)] >= 0)
+
+if Integrate_C02_Infrastructure
+
+    # CO2 Infrastructure
+
+    # CO2 Storages
+    @variable(ESM,CO2_StorageCharge[year,regions, hour, co2_storages]>=0)
+    @variable(ESM,CO2_StorageLevel[year,regions, hour, co2_storages]>=0)
+    @variable(ESM,CO2_StorageNewCapacity[year,regions,co2_storages]>=0)
+    @variable(ESM,CO2_StorageTotalCapacity[year,regions,co2_storages]>=0)
+
+    #CO2 Storage Emissions
+    @variable(ESM,CO2_StorageEmissions[year,regions,co2_storages]>=0)
+
+    # CO2 Pipelines
+    @variable(ESM,3>=CO2_Pipeline_Quantity[year,co2_pipelines,r=regions,rr=regions; (r != rr) && (TradeDistance[r,rr] < 9999)]>=0,Int)
+    @variable(ESM,CO2_PipelineTotalCapacity[year,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)] >= 0)
+    @variable(ESM,CO2_PipelineCost_Investment>=0)
+    @variable(ESM,CO2_PipelineCost_Operational>=0)
+
+    # CO2 Pipeline Emissions (CO2 Leakages)
+    @variable(ESM,CO2_PipelineEmissions[year,regions,co2_pipelines]>=0)
+
+    # CO2 Trade
+    @variable(ESM,CO2_Import[year,hour,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)]  >= 0)
+    @variable(ESM,CO2_Export[year,hour,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)] >= 0)
+
+    # CO2 Storages
+    @variable(ESM,CO2_StorageCost_Investment>=0)
+    @variable(ESM,CO2_StorageCost_Operational>=0)
+
+else
+    
+    # CO2 Storages
+    @variable(ESM,CO2_StorageCharge[year,regions, hour, co2_storages]==0)
+    @variable(ESM,CO2_StorageLevel[year,regions, hour, co2_storages]==0)
+    @variable(ESM,CO2_StorageNewCapacity[year,regions,co2_storages]==0)
+    @variable(ESM,CO2_StorageTotalCapacity[year,regions,co2_storages]==0)
+
+    #CO2 Storage Emissions
+    @variable(ESM,CO2_StorageEmissions[year,regions,co2_storages]==0)
+
+    # CO2 Pipelines
+    @variable(ESM,CO2_Pipeline_Quantity[year,co2_pipelines,r=regions,rr=regions; (r != rr) && (TradeDistance[r,rr] < 9999)]==0)
+    @variable(ESM,CO2_PipelineTotalCapacity[year,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)] ==0)
+    @variable(ESM,CO2_PipelineCost_Investment==0)
+    @variable(ESM,CO2_PipelineCost_Operational==0)
+
+    # CO2 Pipeline Emissions (CO2 Leakages)
+    @variable(ESM,CO2_PipelineEmissions[year,regions,co2_pipelines]==0)
+
+    # CO2 Trade
+    @variable(ESM,CO2_Import[year,hour,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)] ==0)
+    @variable(ESM,CO2_Export[year,hour,co2_pipelines,r=regions,rr=regions; r != rr && (TradeDistance[r,rr] < 9999)] ==0)
+
+    # CO2 Storages
+    @variable(ESM,CO2_StorageCost_Investment==0)
+    @variable(ESM,CO2_StorageCost_Operational==0)
+
+end     
+
+# CO2 Emission Costs 
+@variable(ESM,CO2_Emission_Costs>=0)
+
+
+## Constraints
+
+# unregister(ESM, :CO2_TotalCosts_Constraint)
+
+# C02 infrastructure specific constraints (fuel = "Stored_CO2")
+
+# "Producing" (capturing) CO2 without demand
+# The OutputRatio[t,"Stored_CO2"] must equal the EmissionRatio 
+@constraint(ESM, CO2_Capturing[y in year, r in regions,h in hour, t in technologies; OutputRatio[t,"Stored_CO2"]>0],
+        Production[y,r,h,t,"Stored_CO2"] == sum(OutputRatio[t,f] * Production[y,r,h,t,f] for f in fuels[Not(8)])
+)
+
+# CO2 mass balance
+@constraint(ESM, CO2_MassBalance[y in year, r in regions,h in hour],
+        sum(Production[y,r,h,t,"Stored_CO2"] for t in technologies if OutputRatio[t,"Stored_CO2"]>0) + sum(CO2_Import[y,h,t,r,rr] for t in co2_pipelines, rr in regions if rr != r && (TradeDistance[r,rr] < 9999)) == sum(CO2_Export[y,h,t,r,rr] for t in co2_pipelines, rr in regions if rr != r && (TradeDistance[r,rr] < 9999)) + sum(CO2_StorageCharge[y,r,h,s] for s in co2_storages)
+)
+
+# CO2 storage mass balance for h > 1
+@constraint(ESM, CO2_StorageLevelFunction_1[y in year,r in regions, h in hour, s in co2_storages; h>1],
+    CO2_StorageLevel[y,r,h,s] == CO2_StorageLevel[y,r,h-1,s] * StorageLosses[s,"Stored_CO2"] + CO2_StorageCharge[y,r,h,s]
+)
+
+# CO2 storage mass balance for h == 1 && y > 2020
+@constraint(ESM, CO2_StorageLevelFunction_2[y in year,r in regions, h in hour, s in co2_storages; h==1 && y > 2020],
+    CO2_StorageLevel[y,r,h,s] == CO2_StorageLevel[y-10,r,120,s] * StorageLosses[s,"Stored_CO2"] + CO2_StorageCharge[y,r,h,s]
+)
+
+# CO2 storage mass balance for h == 1 && y == 2020
+@constraint(ESM, CO2_StorageLevelFunction_3[y in year,r in regions, h in hour, s in co2_storages; h==1 && y == 2020],
+    CO2_StorageLevel[y,r,h,s] == CO2_StorageCharge[y,r,h,s]
+)
+
+# CO2 storage capacity
+@constraint(ESM, CO2_StorageCapacity[y in year, r in regions,h in hour, s in co2_storages],
+    CO2_StorageLevel[y,r,h,s] <= CO2_StorageTotalCapacity[y,r,s]
+)
+
+# CO2 total storage capacity
+@constraint(ESM, CO2_Total_StorageCapacity_Constraint[y in year, r in regions,h in hour, s in co2_storages],
+    CO2_StorageTotalCapacity[y,r,s] == sum(CO2_StorageNewCapacity[yy,r,s] for yy in year if yy <= y) 
+)
+
+# CO2 maximum storage capacity
+@constraint(ESM, CO2_StorageMaximumCapacity_Constraint[y in year, r in regions,h in hour, s in co2_storages],
+    CO2_StorageTotalCapacity[y,r,s] <= CO2_StorageMaximumCapacity[r,s]
+)
+
+# CO2 storage emissions
+@constraint(ESM, CO2_StorageEmissions_Constraint[y in year,r in regions, s in co2_storages],
+    CO2_StorageEmissions[y,r,s] == sum(CO2_StorageLevel[y,r,h,s] * (1 - StorageLosses[s,"Stored_CO2"])  for h in hour)
+)
+
+# CO2 Import/Export 
+@constraint(ESM, C02_ImportExportBalance[y in year,h in hour,t in co2_pipelines,r in regions, rr in regions; rr != r && (TradeDistance[r,rr] < 9999)],
+    CO2_Export[y,h,t,r,rr]*(1-TradeLossFactor["Stored_CO2"]*TradeDistance[r,rr]) == CO2_Import[y,h,t,rr,r]
+)
+
+# CO2 pipeline capacity 
+@constraint(ESM, CO2_MaxImportFunction[t in co2_pipelines, y in year, r in regions, rr in regions; rr != r && (TradeDistance[r,rr] < 9999)],
+    sum(CO2_Import[y,h,t,r,rr] for h in hour) <= CO2_PipelineTotalCapacity[y,t,r,rr]
+)
+
+# CO2 total pipeline capacity 
+@constraint(ESM, CO2_PipelineTotalCapacity_Constraint[t in co2_pipelines, y in year, r in regions, rr in regions; (r != rr) && (TradeDistance[r,rr] < 9999)],
+    CO2_PipelineTotalCapacity[y,t,r,rr] == sum(CO2_Pipeline_Quantity[yy,t,r,rr] * CO2_PipelineCapacity[t] for yy in year if yy <= y)
+)
+
+# Maximum CO2 pipeline capacity 
+@constraint(ESM, CO2_MaximumTradeCapacity_Constraint[y in year,r in regions, rr in regions; rr != r && (TradeDistance[r,rr] < 9999)],
+    sum(CO2_PipelineTotalCapacity[y,t,r,rr] for t in co2_pipelines) <= CO2_MaximumTradeCapacity[r,rr]
+)
+
+# CO2 Trade emissions
+@constraint(ESM, CO2_PipelineEmissions_Constraint[y in year,t in co2_pipelines, r in regions],
+    sum(CO2_Export[y,h,t,r,rr]*(TradeLossFactor["Stored_CO2"]*TradeDistance[r,rr]) for h in hour, rr in regions if rr != r && (TradeDistance[r,rr] < 9999)) == CO2_PipelineEmissions[y,r,t]
+)
+
+
+
+
+# Generation must meet demand
+# (Stored_CO2 is excluded)
+@constraint(ESM, DemandAdequacy[y in year, r in regions,h in hour,f in fuels[Not(8)]],
+    sum(Production[y,r,h,t,f] for t in technologies) + sum(StorageDischarge[y,r,s,h,f] for s in storages if StorageDisChargeEfficiency[s,f]>0) + sum(Import[y,h,r,rr,f] for rr in regions if r != rr && (TradeDistance[r,rr] < 9999)) == Demand[y,r,f]*DemandProfile[r,f,h] + sum(Use[y,r,h,t,f] for t in technologies)+Curtailment[y,r,h,f] + sum(StorageCharge[y,r,s,h,f] for s in storages if StorageChargeEfficiency[s,f] > 0) + sum(Export[y,h,r,rr,f] for rr in regions if rr != r && (TradeDistance[r,rr] < 9999))
+)
+
+# Define the use by the production
+@constraint(ESM, UseFunction[y in year,r in regions,h in hour,t in technologies, f in fuels],
+    InputRatio[t,f] * sum(Production[y,r,h,t,ff] for ff in fuels) == Use[y,r,h,t,f]
+)
+
+# Calculate the total installed capacity in each year
+@constraint(ESM, TotalCapacityFunction[y in year, t in technologies, r in regions],
+    sum(NewCapacity[yy,r,t] for yy in year if yy<=y && y-yy <= TechnologyLifetime[t]) + ResidualCapacity[y,r,t] == TotalCapacity[y,r,t]
+)
+
+# Installed capacity is limited by the maximum capacity
+@constraint(ESM, MaxCapacityFunction[y in year,r in regions,t in technologies],
+     TotalCapacity[y,r,t] <= MaxCapacity[y,r,t]
+)
+
+# Limit the production by the installed capacity
+@constraint(ESM, ProductionFuntion_disp[y in year,r in regions,h in hour, t in technologies, f in fuels;TagDispatchableTechnology[t]>0],
+    OutputRatio[t,f] * TotalCapacity[y,r,t] * CapacityFactor[r,t,h] >= Production[y,r,h,t,f]
+)
+
+# For variable renewables, the production needs to be always at maximum
+@constraint(ESM, ProductionFunction_res[y in year,r in regions,h in hour, t in technologies, f in fuels; TagDispatchableTechnology[t]==0],
+    OutputRatio[t,f] * TotalCapacity[y,r,t] * CapacityFactor[r,t,h] == Production[y,r,h,t,f]
+)
+
+# Technology emissions
+@constraint(ESM, AnnualTechnologyEmissions_Constraint[y in year,t in technologies, r in regions],
+    sum(Production[y,r,h,t,f] for f in fuels, h in hour) * EmissionRatio[t] == AnnualTechnologyEmissions[y,r,t]
+)
+
+# Limit the emissions per year
+@constraint(ESM, AnnualEmissionsLimitFunction[y in year, r in regions],
+    sum(AnnualTechnologyEmissions[y,r,t] for t in technologies) + sum(CO2_PipelineEmissions[y,r,t] for t in co2_pipelines) + sum(CO2_StorageEmissions[y,r,s] for s in co2_storages) <= AnnualEmissionLimit[r,y]
+)
+
+# Account for the total emissions
+@constraint(ESM, TotalEmissionsAccounting,
+    sum(AnnualTechnologyEmissions[y,r,t] * YearlyDifferenceMultiplier[y] for y in year,t in technologies,r in regions) + sum(CO2_PipelineEmissions[y,r,t] * YearlyDifferenceMultiplier[y] for y in year,t in co2_pipelines,r in regions) + sum(CO2_StorageEmissions[y,r,s] for y in year, r in regions, s in co2_storages) == TotalEmissions
+)
+
+# Limit the total emissions
+@constraint(ESM, TotalEmissionsLimitFunction,
+    TotalEmissions <= TotalEmissionLimit[1]
+)
+
+# Storage charge is limited by storage energy capacity and E2PRatio
+@constraint(ESM, StorageChargeFunction[y in year,r in regions, s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
+    StorageCharge[y,r,s,h,f] <= TotalStorageEnergyCapacity[y,r,s,f]/E2PRatio[s]
+)
+
+# Account for currently installed storage capacities
+@constraint(ESM, TotalStorageCapacityFunction[y in year, s in storages, r in regions, f in fuels; StorageDisChargeEfficiency[s,f]>0],
+    sum(NewStorageEnergyCapacity[yy,r,s,f] for yy in year if yy<=y) == TotalStorageEnergyCapacity[y,r,s,f]
+)
+
+# Storage discharge is limited by storage energy capacity and E2PRatio
+@constraint(ESM, StorageDischargeFunction[y in year,r in regions,s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
+    StorageDischarge[y,r,s,h,f] <= TotalStorageEnergyCapacity[y,r,s,f]/E2PRatio[s]
+)
+
+# Storage level depends on previous period's storage level and current period charge/discharge
+@constraint(ESM, StorageLevelFunction[y in year,r in regions,s in storages, h in hour, f in fuels; h>1 && StorageDisChargeEfficiency[s,f]>0],
+    StorageLevel[y,r,s,h,f] == StorageLevel[y,r,s,h-1,f]*StorageLosses[s,f] + StorageCharge[y,r,s,h,f]*StorageChargeEfficiency[s,f] - StorageDischarge[y,r,s,h,f]/StorageDisChargeEfficiency[s,f]
+)
+
+# Storage level for first period does not depend on previous level but we set it to 50% energy capacity
+@constraint(ESM, StorageLevelStartFunction[y in year,r in regions,s in storages, h in hour, f in fuels; h==1 && StorageDisChargeEfficiency[s,f]>0],
+    StorageLevel[y,r,s,h,f] == 0.5*TotalStorageEnergyCapacity[y,r,s,f]*StorageLosses[s,f] + StorageCharge[y,r,s,h,f]*StorageChargeEfficiency[s,f] - StorageDischarge[y,r,s,h,f]/StorageDisChargeEfficiency[s,f]
+)
+
+# Storage level is limited by storage capacity
+@constraint(ESM, MaxStorageLevelFunction[y in year,r in regions,s in storages, h in hour, f in fuels; StorageDisChargeEfficiency[s,f]>0],
+    StorageLevel[y,r,s,h,f] <= TotalStorageEnergyCapacity[y,r,s,f]
+)
+
+# Storage level at the end of a year has to equal storage level at the beginning of year
+@constraint(ESM, StorageAnnualBalanceFunction[y in year,r in regions,s in storages, f in fuels; StorageDisChargeEfficiency[s,f]>0],
+    StorageLevel[y,r,s,n_hour,f] == 0.5*TotalStorageEnergyCapacity[y,r,s,f]
+)
+
+# Storage capacity is limited by max storage capacity
+@constraint(ESM, StorageMaxCapacityConstraint[y in year,r in regions,s in storages],
+    sum(TotalStorageEnergyCapacity[y,r,s,f] for f in fuels if StorageDisChargeEfficiency[s,f]>0) <= MaxStorageCapacity[y,r,s]
+)
+
+# Import/Export (Excluding Stored_CO2)
+@constraint(ESM, ImportExportBalance[y in year,h in hour,r in regions, rr in regions, f in fuels[Not(8)]; r != rr && (TradeDistance[r,rr] < 9999)],
+    Export[y,h,r,rr,f] *(1-TradeLossFactor[f]*TradeDistance[r,rr]) == Import[y,h,rr,r,f]
+)
+#
+
+# Transport capacity (Excluding Stored_CO2)
+@constraint(ESM, MaxImportFunction[y in year,h in hour,r in regions, rr in regions, f in fuels[Not(8)]; r != rr && (TradeDistance[r,rr] < 9999)],
+    Import[y,h,r,rr,f] <= MaxTradeCapacity[y,r,rr,f]
+)
+
+
+
+## Objective function 
+
+# Total production cost
+@constraint(ESM, ProductionCost[t in technologies],
+    TotalProductionAndInvestmentCost[t] == sum(Production[y,r,h,t,f] * VariableCost[y,t] * YearlyDifferenceMultiplier[y] / (1+DiscountRate)^(y - minimum(year)) for f in fuels, h in hour, r in regions, y in year)
+    + sum(NewCapacity[y,r,t] * InvestmentCost[y,t] / (1+DiscountRate)^(y - minimum(year)) for r in regions, y in year)
+)
+
+# Total transport cost (excluding Stored_CO2)
+@constraint(ESM, TransportCost,
+    TotalTransportCost_Operational == sum(Export[y,h,r,rr,f]*TradeCostFactor[f]*TradeDistance[r,rr]  * YearlyDifferenceMultiplier[y] / (1+DiscountRate)^(y - minimum(year)) for y in year, h in hour, rr in regions, f in fuels[Not(8)], r in regions if (rr != r) && (TradeDistance[r,rr] < 9999)) 
+)
+
+# Storage cost are the sum of all energy storage technology costs
+@constraint(ESM, StorageCostFunction[s in storages],
+    TotalEnergyStorageCost_Investment[s] ==
+    (sum(NewStorageEnergyCapacity[y,r,s,f] * InvestmentCostStorage[y,s] / (1+DiscountRate)^(y - minimum(year)) for f in fuels[Not(8)], r in regions, y in year if StorageDisChargeEfficiency[s,f]>0))
+)
+
+# Salvage values
+@constraint(ESM, SalvageValue_0[y in year, r in regions, t in vcat(technologies, co2_pipelines); y + TechnologyLifetime[t] <= maximum(year)],
+    SalvageValue[y,r,t] == 0
+)
+
+@constraint(ESM, SalvageValue_1[y in year, r in regions, t in technologies; y + TechnologyLifetime[t] > maximum(year)],
+    SalvageValue[y,r,t] == InvestmentCost[y,t] * NewCapacity[y,r,t]/(1+DiscountRate)^(y−minimum(year)) * (1 − ((maximum(year)-y+1)/TechnologyLifetime[t])) 
+)
+
+@constraint(ESM, SalvageValue_2[y in year, r in regions, t in co2_pipelines; (y + TechnologyLifetime[t] > maximum(year))],
+    SalvageValue[y,r,t] == sum(CO2_Pipeline_Quantity[y,t,rr,r] * TradeDistance[rr,r] * CO2_PipelineInvestmentCost[t]/(1+DiscountRate)^(y−minimum(year)) * (1 − ((maximum(year)-y+1)/TechnologyLifetime[t])) for rr in regions if (r != rr) && (TradeDistance[r,rr] < 9999)) 
+)
+
+
+## CO2 Infrastructure
+
+# CO2 pipeline investment costs
+@constraint(ESM, CO2_PipelineCost_Investment_Constraint,
+    CO2_PipelineCost_Investment == sum(CO2_Pipeline_Quantity[y,t,r,rr] * TradeDistance[r,rr] * CO2_PipelineInvestmentCost[t] / (1+DiscountRate)^(y - minimum(year)) for y in year, t in co2_pipelines, r in regions, rr in regions if (r != rr) && (TradeDistance[r,rr] < 9999))
+)
+
+# CO2 pipeline operational costs
+@constraint(ESM, CO2_PipelineCost_Operational_Constraint,
+    CO2_PipelineCost_Operational == sum(CO2_Export[y,h,t,r,rr] * TradeCostFactor["Stored_CO2"] * TradeDistance[r,rr] * YearlyDifferenceMultiplier[y] / (1+DiscountRate)^(y - minimum(year)) for y in year, h in hour, t in co2_pipelines, r in regions, rr in regions if rr != r && (TradeDistance[r,rr] < 9999)) 
+)
+
+# CO2 storage investment costs
+@constraint(ESM, CO2_StorageCost_Investment_Constraint,
+    CO2_StorageCost_Investment == sum(CO2_StorageNewCapacity[y,r,s] * CO2_StoragesInvestmentCost[s] / (1+DiscountRate)^(y - minimum(year)) for s in co2_storages, r in regions, y in year) 
+)
+
+# CO2 storage operational costs
+@constraint(ESM, CO2_StorageCost_Operational_Constraint,
+    CO2_StorageCost_Operational == sum(sum(CO2_StorageLevel[y,r,h,s] for h in hour) * YearlyDifferenceMultiplier[y] * CO2_StoragesVariableCost[s] / (1+DiscountRate)^(y - minimum(year)) for s in co2_storages, r in regions, y in year)
+) 
+
+# CO2 Emission costs
+@constraint(ESM, TotalEmissionsCosts,
+    CO2_Emission_Costs == sum(AnnualTechnologyEmissions[y,r,t] * YearlyDifferenceMultiplier[y] * CO2_Price[y] / (1+DiscountRate)^(y - minimum(year)) for y in year, r in regions, t in technologies if EmissionRatio[t] > 0) + sum(CO2_PipelineEmissions[y,r,t] * YearlyDifferenceMultiplier[y] * CO2_Price[y] / (1+DiscountRate)^(y - minimum(year)) for y in year, r in regions, t in co2_pipelines) + sum(CO2_StorageEmissions[y,r,s] * CO2_Price[y] / (1+DiscountRate)^(y - minimum(year)) for y in year, r in regions, s in co2_storages)
+)
+
+# Objective function
+# Minimize total costs
+@objective(ESM, Min,
+    sum(TotalProductionAndInvestmentCost[t] for t in technologies)
+    + sum(TotalEnergyStorageCost_Investment[s] for s in storages)
+    + TotalTransportCost_Operational
+    + CO2_PipelineCost_Investment
+    + CO2_PipelineCost_Operational
+    + CO2_StorageCost_Investment
+    + CO2_StorageCost_Operational
+    + CO2_Emission_Costs
+    - sum(SalvageValue[y,r,t] for y in year, r in regions, t in technologies)
+)
+
+
+
+# This starts the optimization
+# The assigned solver (here Clp) will takes care of the solution algorithm
+optimize!(ESM)
+# Reading our objective value
+#objective_value(ESM)
+
+
+
+## Output analysis
+
+# Creating dataframes including the model results
+
+# General analysis of the energy system
+df_production = DataFrame(Containers.rowtable(value, Production; header = [:Year, :Region, :Hour, :Technology, :Fuel, :value]))
+df_production = df_production[(df_production.Fuel .!= "Stored_CO2"), :]
+df_use = DataFrame(Containers.rowtable(value, Use; header = [:Year, :Region, :Hour, :Technology, :Fuel, :value]))
+df_capacity = DataFrame(Containers.rowtable(value, TotalCapacity; header = [:Year, :Region, :Technology, :value]))
+df_newcapacity = DataFrame(Containers.rowtable(value, NewCapacity; header = [:Year, :Region, :Technology, :value]))
+df_demand = DataFrame(
+    (Year=y, Region=r, Hour=h, Fuel=f, value=Demand[y,r,f]*DemandProfile[r,f,h]) for y in year, r in regions, f in fuels, h in hour
+)
+
+df_AnnualTechnologyEmissions = filter(row -> row.value != 0, DataFrame(Containers.rowtable(value,AnnualTechnologyEmissions; header = [:Year, :Region,:Technology, :value])))
+df_CO2_PipelineEmissions = filter(row -> row.value != 0, DataFrame(Containers.rowtable(value,CO2_PipelineEmissions; header = [:Year, :Region,:Technology, :value])))
+df_CO2_StorageEmissions = filter(row -> row.value != 0, DataFrame(Containers.rowtable(value,CO2_StorageEmissions; header = [:Year, :Region,:Technology, :value])))
+
+append!(df_AnnualTechnologyEmissions, df_CO2_PipelineEmissions)
+append!(df_AnnualTechnologyEmissions, df_CO2_StorageEmissions)
+
+# Energy storages
+df_storage_production = DataFrame(Containers.rowtable(value,StorageDischarge; header = [:Year, :Region, :Technology, :Hour, :Fuel, :value]))
+df_storage_charge = DataFrame(Containers.rowtable(value,StorageCharge; header = [:Year, :Region, :Technology, :Hour, :Fuel, :value]))
+df_storage_level = DataFrame(Containers.rowtable(value,StorageLevel; header = [:Year, :Region, :Technology, :Hour, :Fuel, :value]))
+# TotalStorageEnergyCapacity Create dataframe
+
+# Export/Import
+df_export = DataFrame(Containers.rowtable(value,Export; header = [:Year, :Hour, :From, :To, :Fuel, :value]))
+df_import = DataFrame(Containers.rowtable(value,Import; header = [:Year, :Hour, :To, :From, :Fuel, :value]))
+
+# Fusion of dataframes
+append!(df_use, df_storage_charge)
+append!(df_production, df_storage_production)
+
+# System costs
+Total_SystemCosts_Including_SalvageValues = objective_value(ESM) + sum(value.(SalvageValue)[y,r,t] for y in year, r in regions, t in technologies)
+Total_ProductionAndInvestmentCost_PowerPlants_Without_CCS = sum(value.(TotalProductionAndInvestmentCost)[t] for t in setdiff(technologies,PowerPlantsWithCCS) if OutputRatio[t,"Power"] > 0)
+Total_ProductionAndInvestmentCost_With_CCS = sum(value.(TotalProductionAndInvestmentCost)[t] for t in PowerPlantsWithCCS)
+EnergyStorageInvestmentCosts = value.(TotalEnergyStorageCost_Investment)
+Sum_EnergyStorageInvestmentCosts = sum(EnergyStorageInvestmentCosts[s] for s in storages)
+Total_TransportCost_Operational = value.(TotalTransportCost_Operational)
+CO2_PipelineCost_Investment = value.(CO2_PipelineCost_Investment)
+CO2_PipelineCost_Operational = value.(CO2_PipelineCost_Operational)
+CO2_Total_PipelineCost = CO2_PipelineCost_Investment + CO2_PipelineCost_Operational
+CO2_StorageCost_Investment = value.(CO2_StorageCost_Investment)
+CO2_StorageCost_Operational = value.(CO2_StorageCost_Operational)
+CO2_Total_StorageCosts = CO2_StorageCost_Investment + CO2_StorageCost_Operational
+
+Total_CO2_Infrastructure_Costs = Total_ProductionAndInvestmentCost_With_CCS + CO2_PipelineCost_Investment + CO2_PipelineCost_Operational + CO2_StorageCost_Investment + CO2_StorageCost_Operational
+
+CO2_Emission_Costs = value.(CO2_Emission_Costs)
+
+df_system_costs = DataFrame(Total_SystemCosts_Including_SalvageValues = Total_SystemCosts_Including_SalvageValues, Total_ProductionAndInvestmentCost_PowerPlants_Without_CCS = Total_ProductionAndInvestmentCost_PowerPlants_Without_CCS, Sum_EnergyStorageInvestmentCosts = Sum_EnergyStorageInvestmentCosts, Total_TransportCost_Operational = Total_TransportCost_Operational, Scenario = scenario_name,Total_ProductionAndInvestmentCost_With_CCS = Total_ProductionAndInvestmentCost_With_CCS, CO2_PipelineCost_Investment = CO2_PipelineCost_Investment, CO2_PipelineCost_Operational = CO2_PipelineCost_Operational, CO2_Total_PipelineCost = CO2_Total_PipelineCost, CO2_StorageCost_Investment = CO2_StorageCost_Investment, CO2_StorageCost_Operational = CO2_StorageCost_Operational, CO2_Total_StorageCosts = CO2_Total_StorageCosts, Total_CO2_Infrastructure_Costs = Total_CO2_Infrastructure_Costs, CO2_Emission_Costs = CO2_Emission_Costs)
+
+rename!(df_system_costs, :Total_SystemCosts_Including_SalvageValues => "Total Energy System Costs (Salvage Values included)", :Total_ProductionAndInvestmentCost_PowerPlants_Without_CCS => "Total Costs of Power Plants without CCS", :Sum_EnergyStorageInvestmentCosts => "Energy Storage Investment Costs", :Total_TransportCost_Operational => "Transport Costs", :Total_ProductionAndInvestmentCost_With_CCS => "Total Costs of Power Plants with CCS", :CO2_PipelineCost_Investment => "CO2 Pipeline Investment Costs", :CO2_PipelineCost_Operational => "CO2 Pipeline Operational Costs", :CO2_Total_PipelineCost => "Total CO2 Pipeline Costs",:CO2_StorageCost_Investment => "CO2 Storage Investment Costs", :CO2_StorageCost_Operational => "CO2 Storage Operational Costs", :CO2_Total_StorageCosts => "Total CO2 Storage Costs", :Total_CO2_Infrastructure_Costs => "Total CO2 Infrastructure Costs",:CO2_Emission_Costs => "Total CO2 Emission Costs")
+
+# CO2 infrastructure
+df_CO2_production = DataFrame(Containers.rowtable(value, Production; header = [:Year, :Region, :Hour, :Technology, :Fuel, :value]))
+df_CO2_production = df_CO2_production[(df_CO2_production.Fuel .== "Stored_CO2"), :]
+
+
+df_CO2_StorageNewCapacity = DataFrame(Containers.rowtable(value,CO2_StorageNewCapacity; header = [:Year, :Region, :CO2_Storage, :value]))
+df_CO2_StorageTotalCapacity = DataFrame(Containers.rowtable(value,CO2_StorageTotalCapacity; header = [:Year, :Region, :CO2_Storage, :value]))
+
+df_CO2_storage_charge = DataFrame(Containers.rowtable(value,CO2_StorageCharge; header = [:Year, :Region, :Hour, :CO2_Storage, :value]))
+df_CO2_storage_level = DataFrame(Containers.rowtable(value,CO2_StorageLevel; header = [:Year, :Region, :Hour, :CO2_Storage, :value]))
+
+df_CO2_Pipeline_Quantity = DataFrame(Containers.rowtable(value,CO2_Pipeline_Quantity; header = [:Year, :CO2_Transport_Technology, :To, :From, :value]))
+df_CO2_PipelineTotalCapacity = DataFrame(Containers.rowtable(value,CO2_PipelineTotalCapacity; header = [:Year, :CO2_Transport_Technology, :To, :From, :value]))
+
+df_CO2_Import = DataFrame(Containers.rowtable(value,CO2_Import; header = [:Year, :Hour,:CO2_Transport_Technology, :To, :From, :value]))
+df_CO2_Export = DataFrame(Containers.rowtable(value,CO2_Export; header = [:Year, :Hour,:CO2_Transport_Technology, :From, :To, :value]))
+
+
+## Output to CSV
+
+CSV.write(joinpath(result_path, "production.csv"), df_production[(df_production.value .> 0),:])
+CSV.write(joinpath(result_path, "use.csv"), df_use[(df_use.value .> 0),:])
+CSV.write(joinpath(result_path, "demand.csv"), df_demand[(df_demand.value .> 0),:])
+CSV.write(joinpath(result_path, "new_capacity.csv"), df_newcapacity[(df_newcapacity.value .> 0),:])
+CSV.write(joinpath(result_path, "total_capacity.csv"), df_capacity[(df_capacity.value .> 0),:])
+CSV.write(joinpath(result_path, "import.csv"), df_import[(df_import.value .> 0),:])
+CSV.write(joinpath(result_path, "export.csv"), df_export[(df_export.value .> 0),:])
+CSV.write(joinpath(result_path, "storage_level.csv"), df_storage_level[(df_storage_level.value .> 0),:])
+CSV.write(joinpath(result_path, "annual_emission.csv"), df_AnnualTechnologyEmissions[(df_AnnualTechnologyEmissions.value .!= 0),:]) 
+
+# CO2 infrastructure results
+if Integrate_C02_Infrastructure
+
+    CSV.write(joinpath(result_path, "CO2_production.csv"), df_CO2_production[(df_CO2_production.value .> 0),:])
+
+    CSV.write(joinpath(result_path, "CO2_Export.csv"), df_CO2_Export[(df_CO2_Export.value .> 0),:])
+    CSV.write(joinpath(result_path, "CO2_Import.csv"), df_CO2_Import[(df_CO2_Import.value .> 0),:])
+
+    CSV.write(joinpath(result_path, "CO2_NewStorageCapacity.csv"), df_CO2_StorageNewCapacity[(df_CO2_StorageNewCapacity.value .> 0),:])
+    CSV.write(joinpath(result_path, "CO2_TotalStorageCapacity.csv"), df_CO2_StorageTotalCapacity[(df_CO2_StorageTotalCapacity.value .> 0),:])
+    CSV.write(joinpath(result_path, "CO2_storage_charge.csv"), df_CO2_storage_charge[(df_CO2_storage_charge.value .> 0),:])
+    CSV.write(joinpath(result_path, "CO2_storage_level.csv"), df_CO2_storage_level[(df_CO2_storage_level.value .> 0),:])
+
+    CSV.write(joinpath(result_path, "CO2_NewPipelineCapacity.csv"), df_CO2_Pipeline_Quantity[(df_CO2_Pipeline_Quantity.value .> 0),:])
+    CSV.write(joinpath(result_path, "CO2_TotalPipelineCapacity.csv"), df_CO2_PipelineTotalCapacity[(df_CO2_PipelineTotalCapacity.value .> 0),:])
+
+else
+
+    CSV.write(joinpath(result_path, "CO2_production.csv"), df_CO2_production)
+
+    CSV.write(joinpath(result_path, "CO2_Export.csv"), df_CO2_Export)
+    CSV.write(joinpath(result_path, "CO2_Import.csv"), df_CO2_Import)
+
+    CSV.write(joinpath(result_path, "CO2_NewStorageCapacity.csv"), df_CO2_StorageNewCapacity)
+    CSV.write(joinpath(result_path, "CO2_TotalStorageCapacity.csv"), df_CO2_StorageTotalCapacity)
+    CSV.write(joinpath(result_path, "CO2_storage_charge.csv"), df_CO2_storage_charge)
+    CSV.write(joinpath(result_path, "CO2_storage_level.csv"), df_CO2_storage_level)
+
+    CSV.write(joinpath(result_path, "CO2_NewPipelineCapacity.csv"), df_CO2_Pipeline_Quantity)
+    CSV.write(joinpath(result_path, "CO2_TotalPipelineCapacity.csv"), df_CO2_PipelineTotalCapacity)
+
+end 
+
+# Energy System Costs
+CSV.write(joinpath(result_path, "system_costs.csv"), df_system_costs)
+
+
+# Print technology names according to the conducted scenario
+technologies_scenario_run = copy(technologies)
+
+for i in 1:length(technologies_scenario_run)
+    #if occursin("CCS",technologies_scenario_run[i])
+    global technologies_scenario_run[i] = replace(technologies_scenario_run[i], "CCS" => scenario_name)
+    #end    
+end
+
+df_technologies_scenario_run = DataFrame(;technologies)
+df_technologies_scenario_run[!, :technologies_scenario_run] = technologies_scenario_run
+
+rename!(df_technologies_scenario_run, :technologies => "General technologies", :technologies_scenario_run => "Aquivalent technologies used in this scenario run") 
+CSV.write(joinpath(result_path, "technologies_scenario.csv"), df_technologies_scenario_run)
+
+
+# Print message on terminal/REPL
+println()
+println()
+println("Data Output to Output.xlsx complete!")
+println()
+println("Update DataQuery within Output.xlsx to see the results of this model run!")
+println()
+println()
+
+include(joinpath(@__DIR__, "colors.jl")) # colors for the plots
+
+open(joinpath(result_path, "colors.json"), "w") do f
+    JSON3.pretty(f, JSON3.write(colors))
+    println(f)
+end
+
+# Use solution from previous run as start values for a new run
+if save_solution_values
+    x = all_variables(ESM);
+    x_solution = value.(x);
+    set_start_value.(x, x_solution);
+end
+
+
+# OLD CODE
+#=
+
+## Output to XLSX
+
+#=
+function output_xlsx(output_file, worksheet_name, data_frame)
+    XLSX.openxlsx(output_file, mode="rw") do xf
+        sheet = xf[worksheet_name]
+        XLSX.writetable!(sheet, data_frame)
+    end
+end
+
+output_xlsx("results/output.xlsx", "Demand", df_demand)
+output_xlsx("results/output.xlsx", "Production", df_production)
+output_xlsx("results/output.xlsx", "New Capacity", df_newcapacity)
+output_xlsx("results/output.xlsx", "Total Capacity", df_capacity)
+output_xlsx("results/output.xlsx", "Energy Storage Levels", df_storage_level)
+output_xlsx("results/output.xlsx", "Export", df_export)
+output_xlsx("results/output.xlsx", "Import", df_import)
+output_xlsx("results/output.xlsx", "Annual CO2 Emissions", df_annualemissions)
+output_xlsx("results/output.xlsx", "Captured CO2 Emissions", df_CO2_production)
+output_xlsx("results/output.xlsx", "CO2 Storage Charges", df_CO2_storage_charge)
+output_xlsx("results/output.xlsx", "CO2 Storage Levels", df_CO2_storage_level)
+=#
+
+
+# View/check results
+# df_CO2_storage_level[(df_CO2_storage_level.Region .== "FR") .& (df_CO2_storage_level.value .> 0), :]
+# df_CO2_storage_charge[(df_CO2_storage_charge.Region .== "DE") .& (df_CO2_storage_charge.value .> 0) .& (df_CO2_storage_charge.Year == 2020), :]
+# df_export[(df_export.To .== "FR") .& (df_export.Fuel .== "Stored_CO2"), :]
+
+# print(df_export[(df_export.To .== "FR") .& (df_export.Fuel .== "Coal") .& (df_export.Year .== 2030) , :])
+# print(df_import[(df_import.To .== "FR") .& (df_import.Fuel .== "Coal") .& (df_import.Year .== 2030) , :])
+
+# print(df_import[(df_import.To .== "FR") .& (df_import.Fuel .== "Coal") .& (df_import.Year .== 2030) .& (df_import.Hour .< 20) , :])
+# print(df_export[(df_export.To .== "FR") .& (df_export.Fuel .== "Coal") .& (df_export.Year .== 2030) .& (df_export.Hour .< 20) , :])
+
+# print(df_export[(df_export.From .== "FR") .& (df_export.To .== "DE") .& (df_export.Fuel .== "Stored_CO2") .& (df_export.Year .== 2020), :])
+# print(df_import[(df_import.From .== "FR") .& (df_import.To .== "DE") .& (df_import.Fuel .== "Stored_CO2") .& (df_import.Year .== 2020), :])
+
+# print(df_import[(df_import.From .== "FR") .& (df_import.Fuel .== "Stored_CO2") .& (df_import.Year .== 2050) .& (df_import.value .> 0) , :])
+
+=#
